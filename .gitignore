@@ -1,0 +1,22 @@
+@'
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.vscode/
+data/raw/
+data/processed/
+*.db
+*.sqlite
+*.sqlite3
+'@ | Set-Content -Encoding utf8 .gitignore
