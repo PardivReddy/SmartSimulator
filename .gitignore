@@ -1,4 +1,3 @@
-@'
 .env
 .env.*
 !.env.example
@@ -14,9 +13,11 @@ dist/
 build/
 *.egg-info/
 .vscode/
+.uv-cache/
 data/raw/
 data/processed/
 *.db
 *.sqlite
 *.sqlite3
-'@ | Set-Content -Encoding utf8 .gitignore
+
+.test-tmp/
