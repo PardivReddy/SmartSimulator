@@ -238,7 +238,7 @@ class Store:
                 raise
 
     def allocate_borrower(self, now: float | None = None) -> dict | None:
-        """Atomically reserve highest-priority eligible borrower without binding an agent upfront."""
+        """Atomically reserve the highest-priority eligible borrower without an agent."""
         now = time.time() if now is None else now
         with self._lock:
             db = self._connection
@@ -802,28 +802,25 @@ class Store:
                 )
                 if kind == "UNCERTAIN" and agent is not None:
                     next_agent_state = "PAUSED"
-                requires_agent_update = (
-                    agent is not None
-                    and (
-                        kind
+                requires_agent_update = agent is not None and (
+                    kind
+                    in {
+                        "INITIATED",
+                        "UNCERTAIN",
+                        "COMPLETED",
+                    }
+                    or (kind == "CONNECTED" and row["state"] != "UNCERTAIN")
+                    or (
+                        kind in {"FAILED", "CANCELLED", "ABANDONED"}
+                        and row["state"]
                         in {
+                            "RESERVED",
                             "INITIATED",
+                            "RINGING",
+                            "ANSWERED",
+                            "CONNECTED",
                             "UNCERTAIN",
-                            "COMPLETED",
                         }
-                        or (kind == "CONNECTED" and row["state"] != "UNCERTAIN")
-                        or (
-                            kind in {"FAILED", "CANCELLED", "ABANDONED"}
-                            and row["state"]
-                            in {
-                                "RESERVED",
-                                "INITIATED",
-                                "RINGING",
-                                "ANSWERED",
-                                "CONNECTED",
-                                "UNCERTAIN",
-                            }
-                        )
                     )
                 )
                 if requires_agent_update and next_agent_state is None:

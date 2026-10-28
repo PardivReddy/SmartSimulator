@@ -210,7 +210,7 @@ class SafetyController:
                 f"{self.min_sample_size}"
             )
 
-        # Trigger 5: Rolling abandonment rate or proposal risk above critical threshold -> FALLBACK_PROGRESSIVE
+        # Trigger 5: Critical rolling abandonment rate or proposal risk -> FALLBACK_PROGRESSIVE
         elif (
             inputs.recent_abandonment_rate > self.critical_abandonment_risk
             or proposal.estimated_abandonment_risk > self.critical_abandonment_risk
@@ -219,10 +219,17 @@ class SafetyController:
             rate = float(approved_calls * 60)
             reasons.append("critical_abandonment_fallback")
             action = "FALLBACK_PROGRESSIVE"
+            critical_risks = []
+            if inputs.recent_abandonment_rate > self.critical_abandonment_risk:
+                critical_risks.append(f"rolling abandon rate {inputs.recent_abandonment_rate:.1%}")
+            if proposal.estimated_abandonment_risk > self.critical_abandonment_risk:
+                critical_risks.append(
+                    f"proposal abandonment risk {proposal.estimated_abandonment_risk:.1%}"
+                )
             reason_line = (
-                f"fallback to progressive: rolling abandon rate "
-                f"{inputs.recent_abandonment_rate:.1%} exceeds critical limit "
-                f"{self.critical_abandonment_risk:.1%}"
+                f"fallback to progressive: critical abandonment limit "
+                f"{self.critical_abandonment_risk:.1%} exceeded by "
+                f"{' and '.join(critical_risks)}"
             )
 
         # Trigger 6: Rolling abandonment rate or proposal risk above warning threshold -> REDUCE
@@ -254,9 +261,11 @@ class SafetyController:
                 f"{inputs.baseline_answer_rate:.2f} to {inputs.answer_rate:.2f}"
             )
 
-        # Trigger 8: Hard cap bounding expected answers from BOTH new calls and calls in flight
+        # Trigger 8: Hard cap bounding expected answers from new and in-flight calls
         else:
-            answer_p = max(0.01, min(1.0, inputs.answer_rate if inputs.sample_count >= 10 else 0.50))
+            answer_p = max(
+                0.01, min(1.0, inputs.answer_rate if inputs.sample_count >= 10 else 0.50)
+            )
             flight_answers = inputs.calls_in_flight * answer_p
             new_answers = proposed_calls * answer_p
             total_answers = flight_answers + new_answers
@@ -329,12 +338,16 @@ def estimate_pacing(inputs: PacingInputs) -> PacingProposal:
     if inputs.sample_count < 10:
         prior = 0.50
         effective_rate = prior
-        window_note = f"window={inputs.sample_count}/{inputs.window_size} < 10 -> using prior {prior:.2f}"
+        window_note = (
+            f"window={inputs.sample_count}/{inputs.window_size} < 10 -> using prior {prior:.2f}"
+        )
     else:
         effective_rate = max(0.01, min(1.0, inputs.answer_rate))
         window_note = f"window={inputs.sample_count}/{inputs.window_size}"
 
-    raw_val = math.ceil(expected_free / effective_rate) if effective_rate > 0 and expected_free > 0 else 0
+    raw_val = (
+        math.ceil(expected_free / effective_rate) if effective_rate > 0 and expected_free > 0 else 0
+    )
     raw_formula = f"raw=ceil({expected_free}/{effective_rate:.2f})={raw_val}"
 
     # Step 1: subtract in_flight calls
@@ -381,10 +394,7 @@ def estimate_pacing(inputs: PacingInputs) -> PacingProposal:
     # Risk metric for reporting
     risk = max(
         0.0,
-        (
-            (calls_to_start * effective_rate) - inputs.available_agents
-        )
-        / max(calls_to_start, 1),
+        ((calls_to_start * effective_rate) - inputs.available_agents) / max(calls_to_start, 1),
     )
 
     return PacingProposal(

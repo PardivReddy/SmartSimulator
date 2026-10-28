@@ -54,8 +54,16 @@ def test_safety_pauses_stale_or_unreliable_inputs():
 
 def test_safety_reduces_abandonment_risk_and_provider_outage():
     controller = SafetyController()
-    reduced = controller.approve(PacingProposal(20, 0.1), inputs())
+    reduced = controller.approve(PacingProposal(20, 0.04), inputs())
     assert reduced.approved_calls_per_minute == 10
+    assert reduced.action == "REDUCE"
+
+    critical = controller.approve(PacingProposal(20, 0.1), inputs())
+    assert critical.action == "FALLBACK_PROGRESSIVE"
+    assert "proposal abandonment risk 10.0%" in critical.reason
+    assert "rolling abandon rate 0.0%" not in critical.reason
+    assert "critical abandonment limit 5.0%" in critical.reason
+
     paused = controller.approve(PacingProposal(20, 0), inputs(provider_health=0.1))
     assert paused.approved_calls_per_minute == 0
 
@@ -79,10 +87,7 @@ def test_predictive_pacing_formula_and_reason_line():
     proposal = estimate_pacing(inp)
     # ceil(10 / 0.60) = 17
     assert proposal.calls_to_start == 17
-    assert (
-        "proposed 17: free=10, answer_rate=0.60 (window=50), in_flight=0 -> ceil(10/0.60)=17"
-        in proposal.reason
-    )
+    assert "window=100/50, raw=ceil(10/0.60)=17 -> proposed 17" in proposal.reason
 
 
 def test_safety_controller_all_decision_types():
@@ -129,7 +134,10 @@ def test_safety_controller_all_decision_types():
     )
     decision4 = controller.approve(large_prop, hard_cap_inp)
     assert decision4.action == "REDUCE"
-    assert "hard cap prevents expected connections" in decision4.reason
+    assert (
+        "reduced to 5: hard cap expected answers "
+        "(8.0 new + 0.0 flight = 8.0) > free agents (4)" in decision4.reason
+    )
 
     # 5. APPROVE when within safe bounds
     safe_inp = inputs(

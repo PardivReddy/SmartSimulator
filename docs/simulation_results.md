@@ -9,19 +9,19 @@ SCENARIO: A | Seed: 42 | Duration: 240s
 ==========================================================================
 Metric                                 | Value                         
 ---------------------------------------+-------------------------------
-Agent Utilization                      | 59.83%
-Calls Initiated                        | 183
-Calls Connected                        | 35
+Agent Utilization                      | 94.97%
+Calls Initiated                        | 314
+Calls Connected                        | 60
 Abandoned Connected Calls              | 0
 Pacing Proposals Evaluated             | 240
-Safety (Approve/Red/Rej/FB)            | 2/162/75/1
+Safety (Approve/Red/Rej/FB)            | 0/72/0/12
 Stranded Calls (Target: 0)             | 0
 --------------------------------------------------------------------------
 Sample Reason Lines:
-  [Pacing] [t=0s] proposed 150: free=30, answer_rate=0.20 (window=50), in_flight=0 -> ceil(30/0.20)=150
-  [Pacing] [t=2s] proposed 141: free=21, answer_rate=0.05 (window=50), in_flight=0 -> ceil(21/0.05)=420
+  [Pacing] [t=0s] window=0/50 < 10 -> using prior 0.50, raw=ceil(30/0.50)=60 -> proposed 60
+  [Pacing] [t=2s] window=21/50, raw=ceil(21/0.01)=2100, capped to 141 by pending_calls=141 -> proposed 141
   [Safety] [t=0s] fallback to progressive: sample size 0 < min 10
-  [Safety] [t=1s] paused: no available agents
+  [Safety] [t=1s] idle: no available agents
 ==========================================================================
 ```
 
@@ -55,19 +55,19 @@ SCENARIO: C | Seed: 42 | Duration: 240s
 ==========================================================================
 Metric                                 | Value                         
 ---------------------------------------+-------------------------------
-Agent Utilization                      | 93.07%
-Calls Initiated                        | 70
-Calls Connected                        | 53
+Agent Utilization                      | 98.89%
+Calls Initiated                        | 80
+Calls Connected                        | 60
 Abandoned Connected Calls              | 0
 Pacing Proposals Evaluated             | 240
-Safety (Approve/Red/Rej/FB)            | 0/54/183/3
+Safety (Approve/Red/Rej/FB)            | 0/3/0/7
 Stranded Calls (Target: 0)             | 0
 --------------------------------------------------------------------------
 Sample Reason Lines:
-  [Pacing] [t=0s] proposed 43: free=30, answer_rate=0.70 (window=50), in_flight=0 -> ceil(30/0.70)=43
-  [Pacing] [t=2s] proposed 9: free=6, answer_rate=0.70 (window=50), in_flight=0 -> ceil(6/0.70)=9
+  [Pacing] [t=0s] window=0/50 < 10 -> using prior 0.50, raw=ceil(30/0.50)=60 -> proposed 60
+  [Pacing] [t=2s] window=6/50 < 10 -> using prior 0.50, raw=ceil(6/0.50)=12 -> proposed 12
   [Safety] [t=0s] fallback to progressive: sample size 0 < min 10
-  [Safety] [t=1s] paused: no available agents
+  [Safety] [t=1s] idle: no available agents
 ==========================================================================
 ```
 
