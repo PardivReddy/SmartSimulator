@@ -40,7 +40,16 @@ class SimulationMetrics:
     ) -> SimulationMetrics:
         attempted = sum(
             states.get(s, 0)
-            for s in ("INITIATED", "RINGING", "ANSWERED", "CONNECTED", "COMPLETED", "FAILED")
+            for s in (
+                "INITIATED",
+                "RINGING",
+                "ANSWERED",
+                "CONNECTED",
+                "COMPLETED",
+                "FAILED",
+                "RETRY_WAIT",
+                "UNCERTAIN",
+            )
         )
         answered = sum(states.get(s, 0) for s in ("ANSWERED", "CONNECTED", "COMPLETED"))
         connected = sum(states.get(s, 0) for s in ("CONNECTED", "COMPLETED"))

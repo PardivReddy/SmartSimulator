@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import threading
 from dataclasses import dataclass
 
 
@@ -10,6 +11,23 @@ from dataclasses import dataclass
 class ProviderEvent:
     kind: str
     delay_seconds: float
+
+
+@dataclass(frozen=True)
+class ProviderRetryPolicy:
+    max_retries: int = 2
+    initial_backoff_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be zero or greater")
+        if self.initial_backoff_seconds <= 0:
+            raise ValueError("initial_backoff_seconds must be positive")
+
+    def backoff_seconds(self, retry_number: int) -> float:
+        if not 1 <= retry_number <= self.max_retries:
+            raise ValueError("retry_number must be within the configured retry limit")
+        return self.initial_backoff_seconds * (2 ** (retry_number - 1))
 
 
 @dataclass
@@ -27,15 +45,26 @@ class MockProvider:
 
     def __post_init__(self) -> None:
         self._random = random.Random(self.seed)
+        self._lock = threading.RLock()
 
     def simulate(self) -> ProviderEvent:
-        if not self.available:
-            return ProviderEvent("FAILED", self.timeout_seconds)
-        if self._random.random() < self.failure_rate:
-            return ProviderEvent("FAILED", self.timeout_seconds)
-        if self._random.random() < self.answer_probability:
-            return ProviderEvent("ANSWERED", self.ringing_delay_seconds + self.duration_seconds)
-        return ProviderEvent("NO_ANSWER", self.ringing_delay_seconds)
+        with self._lock:
+            if not self.available:
+                return ProviderEvent("FAILED", self.timeout_seconds)
+            if self._random.random() < self.failure_rate:
+                return ProviderEvent("FAILED", self.timeout_seconds)
+            if self._random.random() < self.answer_probability:
+                return ProviderEvent("ANSWERED", self.ringing_delay_seconds + self.duration_seconds)
+            return ProviderEvent("NO_ANSWER", self.ringing_delay_seconds)
+
+    @property
+    def is_available(self) -> bool:
+        with self._lock:
+            return self.available
+
+    def set_available(self, available: bool) -> None:
+        with self._lock:
+            self.available = available
 
 
 def default_providers(seed: int = 42) -> tuple[MockProvider, MockProvider]:

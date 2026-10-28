@@ -24,7 +24,10 @@ class CallState(StrEnum):
     CONNECTED = "CONNECTED"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    RETRY_WAIT = "RETRY_WAIT"
+    UNCERTAIN = "UNCERTAIN"
     CANCELLED = "CANCELLED"
+    ABANDONED = "ABANDONED"
 
 
 AGENT_TRANSITIONS: dict[AgentState, set[AgentState]] = {
@@ -34,19 +37,54 @@ AGENT_TRANSITIONS: dict[AgentState, set[AgentState]] = {
     AgentState.DIALING: {AgentState.AVAILABLE, AgentState.CONNECTED, AgentState.PAUSED},
     AgentState.CONNECTED: {AgentState.WRAP_UP, AgentState.PAUSED},
     AgentState.WRAP_UP: {AgentState.AVAILABLE, AgentState.PAUSED},
-    AgentState.PAUSED: {AgentState.AVAILABLE, AgentState.OFFLINE},
+    AgentState.PAUSED: {AgentState.AVAILABLE, AgentState.OFFLINE, AgentState.WRAP_UP},
 }
 
 CALL_TRANSITIONS: dict[CallState, set[CallState]] = {
     CallState.QUEUED: {CallState.RESERVED, CallState.CANCELLED},
-    CallState.RESERVED: {CallState.INITIATED, CallState.CANCELLED, CallState.FAILED},
-    CallState.INITIATED: {CallState.RINGING, CallState.FAILED, CallState.CANCELLED},
-    CallState.RINGING: {CallState.ANSWERED, CallState.FAILED, CallState.CANCELLED},
-    CallState.ANSWERED: {CallState.CONNECTED, CallState.COMPLETED, CallState.FAILED},
-    CallState.CONNECTED: {CallState.COMPLETED, CallState.FAILED},
+    CallState.RESERVED: {
+        CallState.QUEUED,
+        CallState.INITIATED,
+        CallState.CANCELLED,
+        CallState.FAILED,
+        CallState.RETRY_WAIT,
+    },
+    CallState.INITIATED: {
+        CallState.RINGING,
+        CallState.FAILED,
+        CallState.UNCERTAIN,
+        CallState.CANCELLED,
+    },
+    CallState.RINGING: {
+        CallState.ANSWERED,
+        CallState.FAILED,
+        CallState.UNCERTAIN,
+        CallState.CANCELLED,
+    },
+    CallState.ANSWERED: {
+        CallState.CONNECTED,
+        CallState.COMPLETED,
+        CallState.FAILED,
+        CallState.UNCERTAIN,
+        CallState.ABANDONED,
+    },
+    CallState.CONNECTED: {
+        CallState.COMPLETED,
+        CallState.FAILED,
+        CallState.UNCERTAIN,
+    },
     CallState.COMPLETED: set(),
-    CallState.FAILED: set(),
+    CallState.FAILED: {CallState.RETRY_WAIT},
+    CallState.RETRY_WAIT: {CallState.RESERVED, CallState.FAILED, CallState.CANCELLED},
+    CallState.UNCERTAIN: {
+        CallState.RINGING,
+        CallState.ANSWERED,
+        CallState.CONNECTED,
+        CallState.COMPLETED,
+        CallState.FAILED,
+    },
     CallState.CANCELLED: set(),
+    CallState.ABANDONED: set(),
 }
 
 

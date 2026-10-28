@@ -7,9 +7,10 @@
 | B03 | Add transactional progressive allocation | Verified locally | SQLite `BEGIN IMMEDIATE`; multi-connection race test passed |
 | B04 | Add pacing estimator and independent safety controller | Verified locally | boundary/staleness tests passed |
 | B05 | Add seeded mock providers and simulation CLI | Verified locally | deterministic replay and CLI tests passed |
-| B06 | Add event dedupe, ordering checks, and recovery | Partial | event checks and bounded recovery implemented; timeout/backoff/crash harness missing |
+| B06 | Add event dedupe, ordering checks, and recovery | Partial | event checks and bounded recovery implemented; production retry/backoff scheduling and worker crash harness missing |
 | B07 | Profile and map the private synthetic dataset safely | Docs drafted | aggregate-only docs; raw data remains ignored and untracked |
-| B08 | Finish operational metrics and scenario suite | Partial | calls/rates/throughput, utilization/idle, provider failure counts, controller count and representative outage/recovery/no-agent scenarios implemented; queue timing is currently zero; extensive replay/load cases remain |
-| B09 | Run full local lint and test suite | Verified on Python 3.15.1 | Ruff clean and all 57 pytest tests passed; supported CI versions not locally tested |
+| B08 | Finish operational metrics and scenario suite | Partial | calls/rates/throughput, utilization/idle, provider failure counts, controller count, representative scenarios, and basic contention load smoke test implemented; queue timing is currently zero; extensive replay/load cases remain |
+| B09 | Run full local lint and test suite | Verified on Python 3.15.1 | Ruff clean and all 61 pytest tests passed; supported CI versions not locally tested |
 | B10 | Validate GitHub CI | Not run | requires a future push/PR; do not claim success |
 | B11 | Compare behavior to original assignment PDF | Blocked by missing input | no PDF found locally |
+| B12 | Add reproducible basic SQLite load test | Verified locally | `--agents 32 --borrowers 32 --workers 16 --seed 42`: PASS; 32 unique reservations, zero duplicates, zero worker errors; local rate about 40.31 reservations/s (not a capacity claim) |
