@@ -2,7 +2,7 @@
 
 ## Purpose
 
-SmartDialer is a local simulator for selecting queued borrowers, allocating agents, and modeling outbound calls. It supports Progressive and Predictive dialing modes and uses seeded mock providers; it does not connect to telephone carriers.
+SmartSimulator is a local simulator for selecting queued borrowers, allocating agents, and modeling outbound calls. It supports Progressive and Predictive dialing modes and uses seeded mock providers; it does not connect to telephone carriers.
 
 ## End-to-end architecture
 

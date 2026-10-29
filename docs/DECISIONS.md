@@ -1,6 +1,6 @@
-# SmartDialer Architecture Decisions
+# SmartSimulator Architecture Decisions
 
-This document details the core architectural decisions made in SmartDialer, covering what was chosen, the rationale, problems solved, and operational trade-offs, concluding with honest engineering assessments.
+This document details the core architectural decisions made in SmartSimulator, covering what was chosen, the rationale, problems solved, and operational trade-offs, concluding with honest engineering assessments.
 
 ---
 

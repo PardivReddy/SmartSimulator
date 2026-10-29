@@ -1,21 +1,21 @@
-# Resolve SmartDialer Simulator
+# SmartSimulator
 
 A deterministic, local-only simulator for Progressive and Predictive dialing, built with Python and SQLite. It demonstrates explainable pacing proposals, independent safety decisions, transactional allocation, and simulated provider outcomes; it is a prototype, not a production dialer or a guarantee of caller protection.
 
 > [!IMPORTANT]
-> All activities and metrics are **purely simulated**. SmartDialer never places real telephone calls, sends messages, or communicates with external paid telecom carriers.
+> All activities and metrics are **purely simulated**. SmartSimulator never places real telephone calls, sends messages, or communicates with external paid telecom carriers.
 
 ---
 
 ## Final Summary
 
-SmartDialer decouples call estimation from execution through a pipeline: **Campaign → Pacing Engine → Safety Controller → Call Allocator → Mock Provider**. The Predictive Pacing Engine proposes dial volume from available capacity, in-flight calls, and recent answer rates; the independent Safety Controller applies caps and may approve, reduce, reject, pause, or fall back to Progressive dialing under defined conditions. Progressive dialing reserves an agent before initiating; Predictive dialing reserves a borrower and claims an available agent when answered. If no agent can be claimed, the call is recorded as `ABANDONED_NO_AGENT`. These are local simulation behaviors, not production guarantees. Provider events use provider-scoped idempotency and sequence checks. Recovery safely requeues pre-provider reservations and quarantines provider-started calls as `UNCERTAIN`; reconciliation may require a later provider event, and this prototype does not provide production worker supervision or caller-protection/compliance controls.
+SmartSimulator decouples call estimation from execution through a pipeline: **Campaign → Pacing Engine → Safety Controller → Call Allocator → Mock Provider**. The Predictive Pacing Engine proposes dial volume from available capacity, in-flight calls, and recent answer rates; the independent Safety Controller applies caps and may approve, reduce, reject, pause, or fall back to Progressive dialing under defined conditions. Progressive dialing reserves an agent before initiating; Predictive dialing reserves a borrower and claims an available agent when answered. If no agent can be claimed, the call is recorded as `ABANDONED_NO_AGENT`. These are local simulation behaviors, not production guarantees. Provider events use provider-scoped idempotency and sequence checks. Recovery safely requeues pre-provider reservations and quarantines provider-started calls as `UNCERTAIN`; reconciliation may require a later provider event, and this prototype does not provide production worker supervision or caller-protection/compliance controls.
 
 ---
 
 ## Quickstart & Environment Setup
 
-SmartDialer requires **Python 3.11+** and uses standard virtual environments.
+SmartSimulator requires **Python 3.11+** and uses standard virtual environments.
 
 ### 1. Create Virtual Environment and Install Dependencies
 

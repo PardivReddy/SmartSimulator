@@ -1,4 +1,4 @@
-# SmartDialer Simulation Results
+# SmartSimulator Simulation Results
 
 These are deterministic local simulator results recorded on 2026-10-28. They
 are not production measurements and were not rerun during this documentation
