@@ -31,6 +31,15 @@ def test_unavailable_agent_is_never_allocated():
     assert skipped["detail"] == "agent_unavailable"
 
 
+def test_missing_agent_allocation_returns_none():
+    store = populated_store()
+    assert store.allocate("missing-agent") is None
+    skipped = store._connection.execute(
+        "SELECT detail FROM event_history WHERE kind='ALLOCATION_SKIPPED'"
+    ).fetchone()
+    assert skipped["detail"] == "agent_missing"
+
+
 def test_ineligible_borrower_is_skipped():
     store = Store()
     store.add_agent("agent-a")
@@ -58,6 +67,89 @@ def test_event_state_machine_and_terminal_agent_release():
     assert store.allocate("agent-a", now=10) is not None
 
 
+def test_predictive_answers_claim_each_agent_once_and_abandon_surplus(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    database = tmp_path / "predictive-overdial.sqlite3"
+    store = Store(database)
+    for index in range(10):
+        store.add_agent(f"agent-{index:02d}")
+    calls = []
+    for index in range(20):
+        store.add_borrower(f"borrower-{index:02d}", priority=20 - index)
+        call = store.allocate_borrower(now=1)
+        assert call is not None
+        calls.append(call)
+        for sequence, state in enumerate(("INITIATED", "RINGING", "ANSWERED"), start=1):
+            assert (
+                store.process_event(
+                    call["id"],
+                    f"{call['id']}:event:{sequence}",
+                    sequence,
+                    state,
+                    now=sequence,
+                )
+                == "APPLIED"
+            )
+
+    def claim(call_id):
+        contender = Store(database)
+        try:
+            return contender.claim_agent_for_call(call_id, now=4)
+        finally:
+            contender.close()
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        claimed_agents = list(executor.map(claim, (call["id"] for call in calls)))
+
+    successful_claims = [agent_id for agent_id in claimed_agents if agent_id is not None]
+    assert len(successful_claims) == 10
+    assert len(set(successful_claims)) == 10
+    assert sum(agent_id is None for agent_id in claimed_agents) == 10
+
+    for call, agent_id in zip(calls, claimed_agents, strict=True):
+        if agent_id is None:
+            assert (
+                store.process_event(
+                    call["id"],
+                    f"{call['id']}:event:4",
+                    4,
+                    "ABANDONED_NO_AGENT",
+                    payload={"reason": "no_available_agent"},
+                    now=5,
+                )
+                == "APPLIED"
+            )
+
+    assert store.counts()["ABANDONED_NO_AGENT"] == 10
+    assert (
+        store._connection.execute(
+            "SELECT COUNT(DISTINCT agent_id) FROM calls WHERE agent_id IS NOT NULL"
+        ).fetchone()[0]
+        == 10
+    )
+    assert store.recover() == 0
+    store.close()
+
+
+def test_progressive_calls_reserve_agents_and_never_abandon():
+    store = populated_store()
+    call = store.allocate("agent-a", now=1)
+    assert call["agent_id"] == "agent-a"
+    for sequence, state in enumerate(
+        ("INITIATED", "RINGING", "ANSWERED", "CONNECTED", "COMPLETED"), start=1
+    ):
+        assert (
+            store.process_event(
+                call["id"], f"progressive-{sequence}", sequence, state, now=sequence + 1
+            )
+            == "APPLIED"
+        )
+    assert store.counts().get("ABANDONED_NO_AGENT", 0) == 0
+    assert store.call(call["id"])["state"] == "COMPLETED"
+    store.close()
+
+
 def test_recovery_requeues_only_reservations_that_never_reached_a_provider():
     store = populated_store()
     call = store.allocate("agent-a", now=1)
@@ -80,6 +172,99 @@ def test_recovery_requeues_only_reservations_that_never_reached_a_provider():
         ).fetchone()[0]
         == 1
     )
+
+
+def test_recovery_preserves_agent_paused_before_provider_initiation():
+    store = populated_store()
+    call = store.allocate("agent-a", now=1)
+
+    assert store.transition_agent("agent-a", "PAUSED")
+    assert (
+        store.process_event(
+            call["id"], "init-after-agent-paused", 1, "INITIATED", now=2, provider="mock"
+        )
+        == "INVALID_TRANSITION"
+    )
+    assert store.call(call["id"])["state"] == "RESERVED"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "PAUSED"
+    )
+
+    assert store.recover() == 1
+    assert store.call(call["id"])["state"] == "QUEUED"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "PAUSED"
+    )
+    resumed = store.claim_queued("agent-b", now=3)
+    assert resumed["borrower_id"] == call["borrower_id"]
+    assert resumed["id"] == call["id"]
+    assert store.call(call["id"])["state"] == "RESERVED"
+    assert (
+        store._connection.execute(
+            "SELECT COUNT(*) FROM calls WHERE borrower_id=?", (call["borrower_id"],)
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        store._connection.execute(
+            "SELECT COUNT(*) FROM events WHERE call_id=? AND kind='INITIATED'", (call["id"],)
+        ).fetchone()[0]
+        == 0
+    )
+    store.close()
+
+
+def test_recovery_quarantines_predictive_call_crashed_after_answered():
+    store = Store()
+    store.add_agent("agent-a")
+    store.add_borrower("borrower-a")
+    call = store.allocate_borrower(now=1)
+    assert call is not None
+    for sequence, state in enumerate(("INITIATED", "RINGING", "ANSWERED"), start=1):
+        assert (
+            store.process_event(
+                call["id"],
+                f"predictive-{sequence}",
+                sequence,
+                state,
+                now=sequence,
+                provider="mock",
+            )
+            == "APPLIED"
+        )
+
+    assert store.recover() == 0
+    recovered = store.call(call["id"])
+    assert recovered["state"] == "UNCERTAIN"
+    assert recovered["agent_id"] is None
+    assert recovered["recovery_count"] == 1
+    assert store.allocate_borrower(now=5) is None
+    assert store.claim_agent_for_call(call["id"], now=5) is None
+    assert (
+        store.process_event(
+            call["id"],
+            "predictive-late-connected",
+            4,
+            "CONNECTED",
+            now=6,
+            provider="mock",
+        )
+        == "INVALID_TRANSITION"
+    )
+    assert store.call(call["id"])["state"] == "UNCERTAIN"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "AVAILABLE"
+    )
+    assert (
+        store._connection.execute(
+            "SELECT COUNT(*) FROM calls WHERE borrower_id=?", (call["borrower_id"],)
+        ).fetchone()[0]
+        == 1
+    )
+    store.close()
 
 
 def test_recovery_quarantines_provider_started_call_until_late_completion():
@@ -127,6 +312,76 @@ def test_recovery_quarantines_provider_started_call_until_late_completion():
     assert (
         store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
         == "WRAP_UP"
+    )
+
+
+def test_late_connected_after_recovery_restores_owned_agent_and_completion():
+    store = populated_store()
+    call = store.allocate("agent-a", now=1)
+    for sequence, state in enumerate(("INITIATED", "RINGING"), start=1):
+        assert (
+            store.process_event(
+                call["id"], f"late-{sequence}", sequence, state, now=sequence, provider="mock"
+            )
+            == "APPLIED"
+        )
+    assert store.recover() == 0
+
+    assert (
+        store.process_event(call["id"], "late-3", 3, "CONNECTED", now=4, provider="mock")
+        == "APPLIED"
+    )
+    assert store.call(call["id"])["state"] == "CONNECTED"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "CONNECTED"
+    )
+    assert (
+        store.process_event(call["id"], "late-4", 4, "COMPLETED", now=5, provider="mock")
+        == "APPLIED"
+    )
+    assert store.call(call["id"])["state"] == "COMPLETED"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "WRAP_UP"
+    )
+
+
+def test_late_connected_does_not_claim_agent_reassigned_after_recovery():
+    store = populated_store()
+    uncertain = store.allocate("agent-a", now=1)
+    for sequence, state in enumerate(("INITIATED", "RINGING"), start=1):
+        assert (
+            store.process_event(
+                uncertain["id"],
+                f"reassigned-{sequence}",
+                sequence,
+                state,
+                now=sequence,
+                provider="mock",
+            )
+            == "APPLIED"
+        )
+    assert store.recover() == 0
+    # Simulate an out-of-band reassignment after recovery; public state changes
+    # correctly refuse to release an agent still referenced by an UNCERTAIN call.
+    store._connection.execute("UPDATE agents SET state='RESERVED' WHERE id='agent-a'")
+    store._connection.execute(
+        """INSERT INTO calls(id,borrower_id,agent_id,state,created_at,updated_at)
+           VALUES('other-call','borrower-b','agent-a','RESERVED',5,5)"""
+    )
+
+    assert (
+        store.process_event(
+            uncertain["id"], "reassigned-late", 3, "CONNECTED", now=6, provider="mock"
+        )
+        == "INVALID_TRANSITION"
+    )
+    assert store.call(uncertain["id"])["state"] == "UNCERTAIN"
+    assert store.call("other-call")["state"] == "RESERVED"
+    assert (
+        store._connection.execute("SELECT state FROM agents WHERE id='agent-a'").fetchone()["state"]
+        == "RESERVED"
     )
 
 

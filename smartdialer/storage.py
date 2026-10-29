@@ -288,6 +288,8 @@ class Store:
 
     def claim_agent_for_call(self, call_id: str, *, now: float | None = None) -> str | None:
         """Atomically claim one available agent for an answered predictive call."""
+        from smartdialer.domain import AGENT_TRANSITIONS, AgentState, transition
+
         now = time.time() if now is None else now
         with self._lock:
             db = self._connection
@@ -299,6 +301,9 @@ class Store:
                 if not call:
                     db.rollback()
                     return None
+                if call["state"] != "ANSWERED":
+                    db.rollback()
+                    return None
                 if call["agent_id"] is not None:
                     db.rollback()
                     return str(call["agent_id"])
@@ -308,6 +313,7 @@ class Store:
                 if not agent:
                     db.rollback()
                     return None
+                transition(AgentState.AVAILABLE, AgentState.CONNECTED, AGENT_TRANSITIONS)
                 changed = db.execute(
                     "UPDATE agents SET state='CONNECTED' WHERE id=? AND state='AVAILABLE'",
                     (agent["id"],),
@@ -315,10 +321,14 @@ class Store:
                 if changed != 1:
                     db.rollback()
                     return None
-                db.execute(
-                    "UPDATE calls SET agent_id=?, updated_at=? WHERE id=?",
+                changed = db.execute(
+                    """UPDATE calls SET agent_id=?, updated_at=?
+                       WHERE id=? AND agent_id IS NULL AND state='ANSWERED'""",
                     (agent["id"], now, call_id),
-                )
+                ).rowcount
+                if changed != 1:
+                    db.rollback()
+                    return None
                 db.execute(
                     "INSERT INTO event_history(call_id,kind,detail,occurred_at) VALUES(?,?,?,?)",
                     (call_id, "AGENT_CLAIMED_ON_ANSWER", f"agent={agent['id']}", now),
@@ -458,7 +468,11 @@ class Store:
         if next_call_state == "INITIATED":
             return "DIALING" if current_agent_state == "RESERVED" else None
         if next_call_state == "CONNECTED":
-            return "CONNECTED" if current_agent_state == "DIALING" else None
+            if current_agent_state == "DIALING":
+                return "CONNECTED"
+            if previous_call_state == "UNCERTAIN" and current_agent_state == "PAUSED":
+                return "CONNECTED"
+            return None
         if next_call_state == "UNCERTAIN":
             return "PAUSED"
         if next_call_state == "QUEUED":
@@ -768,6 +782,9 @@ class Store:
                 if row is None:
                     db.rollback()
                     return "UNKNOWN_CALL"
+                if kind == "ABANDONED_NO_AGENT" and row["agent_id"] is not None:
+                    db.rollback()
+                    return "INVALID_TRANSITION"
                 existing = db.execute(
                     "SELECT 1 FROM events WHERE provider=? AND event_id=?",
                     (provider, event_id),
@@ -795,6 +812,13 @@ class Store:
                     if agent is None:
                         db.rollback()
                         return "INVALID_TRANSITION"
+                if (
+                    kind == "CONNECTED"
+                    and row["state"] == "UNCERTAIN"
+                    and (agent is None or agent["state"] != "PAUSED")
+                ):
+                    db.rollback()
+                    return "INVALID_TRANSITION"
                 next_agent_state = (
                     self._next_agent_state(row["state"], kind, agent["state"])
                     if agent is not None
@@ -809,7 +833,7 @@ class Store:
                         "UNCERTAIN",
                         "COMPLETED",
                     }
-                    or (kind == "CONNECTED" and row["state"] != "UNCERTAIN")
+                    or (kind == "CONNECTED" and agent["state"] != "CONNECTED")
                     or (
                         kind in {"FAILED", "CANCELLED", "ABANDONED"}
                         and row["state"]
@@ -936,7 +960,7 @@ class Store:
                         ).rowcount
                         if changed != 1:
                             continue
-                        if agent is not None and agent["state"] != "AVAILABLE":
+                        if agent is not None and agent["state"] == "RESERVED":
                             transition(
                                 AgentState(agent["state"]),
                                 AgentState("AVAILABLE"),

@@ -201,11 +201,14 @@ class Simulation:
         provider_health = sum(provider.is_available for provider in self.providers) / len(
             self.providers
         )
+        available_agents = self.store._connection.execute(
+            "SELECT COUNT(*) FROM agents WHERE state='AVAILABLE'"
+        ).fetchone()[0]
         inputs = PacingInputs(
             sum(provider.answer_probability for provider in self.providers) / len(self.providers),
             80.0,
             12.0,
-            agents,
+            available_agents,
             0,
             borrowers,
             provider_health,
@@ -214,10 +217,11 @@ class Simulation:
             now_seconds=started,
             sample_count=100,
         )
-        allowed = float(agents)
+        approved_starts = agents
         if mode == "predictive":
             proposed = estimate_pacing(inputs)
-            allowed = self.safety.approve(proposed, inputs).approved_calls_per_minute / 60
+            decision = self.safety.approve(proposed, inputs)
+            approved_starts = decision.approved_calls_to_start
         provider_capacity = sum(
             min(provider.rate_limit_per_minute, provider.concurrency_limit)
             for provider in self.providers
@@ -226,7 +230,7 @@ class Simulation:
         remaining = min(
             borrowers,
             provider_capacity,
-            agents if mode == "progressive" else max(0, round(allowed)),
+            agents if mode == "progressive" else approved_starts,
         )
         elapsed = 1.0
         provider_errors = 0
@@ -268,6 +272,13 @@ class Simulation:
             if outcome["attempted"] and outcome["failures"] == 0:
                 agent_busy_seconds += provider.duration_seconds + 12.0
         counts = self.store.counts()
+        provider_attempts = self.store._connection.execute(
+            "SELECT COALESCE(SUM(attempts),0) FROM calls"
+        ).fetchone()[0]
+        answered_no_agent = self.store._connection.execute(
+            """SELECT COUNT(*) FROM calls c WHERE c.state='ABANDONED_NO_AGENT'
+               AND EXISTS (SELECT 1 FROM events e WHERE e.call_id=c.id AND e.kind='ANSWERED')"""
+        ).fetchone()[0]
         return SimulationMetrics.from_states(
             counts,
             elapsed_seconds=elapsed,
@@ -276,6 +287,8 @@ class Simulation:
             provider_errors=provider_errors,
             agent_count=agents,
             agent_busy_seconds=agent_busy_seconds,
+            provider_attempts=provider_attempts,
+            answered_no_agent=answered_no_agent,
         )
 
     def run_provider_outage(self, *, agents: int = 4, borrowers: int = 20) -> dict[str, object]:
@@ -437,7 +450,7 @@ def validate_transition_examples() -> bool:
 class _SimActiveCall:
     call_id: str
     borrower_id: str
-    agent_id: str
+    agent_id: str | None
     provider_name: str
     initiated_at: float
     ring_until: float
@@ -535,6 +548,8 @@ def run_scenario(
 
     agent_drop_tick = 30 if scenario == "agent-drop" else -1
     agent_drop_occurred = False
+    available_agents_at_drop = 0
+    offline_agents_at_drop = 0
     adjustment_latency = 0
 
     outage_start_tick = 40 if scenario == "outage" else -1
@@ -566,7 +581,15 @@ def run_scenario(
                     store._connection.execute(
                         "UPDATE agents SET state='OFFLINE' WHERE id=?", (aid,)
                     )
+                elif row and row["state"] in {"RESERVED", "DIALING", "CONNECTED", "WRAP_UP"}:
+                    store.transition_agent(aid, "PAUSED")
             agent_drop_occurred = True
+            available_agents_at_drop = store._connection.execute(
+                "SELECT COUNT(*) FROM agents WHERE state='AVAILABLE'"
+            ).fetchone()[0]
+            offline_agents_at_drop = store._connection.execute(
+                "SELECT COUNT(*) FROM agents WHERE state='OFFLINE'"
+            ).fetchone()[0]
 
         if scenario == "outage":
             if tick == outage_start_tick:
@@ -607,7 +630,7 @@ def run_scenario(
 
                 if ac.will_answer:
                     seq = store.next_event_sequence(cid, provider.name)
-                    store.process_event(
+                    result = store.process_event(
                         cid,
                         f"{cid}:{provider.name}:{seq}",
                         seq,
@@ -615,8 +638,33 @@ def run_scenario(
                         now=now,
                         provider=provider.name,
                     )
+                    if result != "APPLIED":
+                        raise RuntimeError(f"answer event was not applied: {result}")
+                    if ac.agent_id is None:
+                        ac.agent_id = store.claim_agent_for_call(cid, now=now)
+                        if ac.agent_id is None:
+                            abandon_seq = store.next_event_sequence(cid, provider.name)
+                            result = store.process_event(
+                                cid,
+                                f"{cid}:{provider.name}:{abandon_seq}",
+                                abandon_seq,
+                                "ABANDONED_NO_AGENT",
+                                payload={"reason": "no_available_agent"},
+                                now=now,
+                                provider=provider.name,
+                            )
+                            if result != "APPLIED":
+                                raise RuntimeError(
+                                    f"no-agent abandonment event was not applied: {result}"
+                                )
+                            abandoned_calls += 1
+                            sliding_window.record_call(
+                                answered=True, talk_seconds=0.0, abandoned=True
+                            )
+                            ended_call_ids.append(cid)
+                            continue
                     seq2 = store.next_event_sequence(cid, provider.name)
-                    store.process_event(
+                    result = store.process_event(
                         cid,
                         f"{cid}:{provider.name}:{seq2}",
                         seq2,
@@ -624,6 +672,8 @@ def run_scenario(
                         now=now + 0.1,
                         provider=provider.name,
                     )
+                    if result != "APPLIED":
+                        raise RuntimeError(f"connection event was not applied: {result}")
                     ac.state = "CONNECTED"
                     ac.connected_until = now + ac.talk_duration
                     calls_connected += 1
@@ -702,6 +752,7 @@ def run_scenario(
                         now=now,
                         provider=p.name,
                     )
+                    calls_initiated += 1
                     seq2 = store.next_event_sequence(r["id"], p.name)
                     store.process_event(
                         r["id"],
@@ -796,7 +847,12 @@ def run_scenario(
 
         # 4. Dial approved calls
         approved_starts = decision.approved_calls_to_start
-        calls_to_dial = min(approved_starts, avail_agents, pending_borrowers)
+        progressive = decision.action == "FALLBACK_PROGRESSIVE"
+        calls_to_dial = min(approved_starts, pending_borrowers)
+        if progressive:
+            calls_to_dial = min(calls_to_dial, avail_agents)
+        if scenario == "agent-drop" and tick < agent_drop_tick:
+            calls_to_dial = 0
 
         if (
             scenario == "outage"
@@ -806,15 +862,19 @@ def run_scenario(
             new_calls_during_outage += calls_to_dial
 
         for _ in range(calls_to_dial):
-            agent_row = store._connection.execute(
-                "SELECT id FROM agents WHERE state='AVAILABLE' ORDER BY id LIMIT 1"
-            ).fetchone()
-            if not agent_row:
-                break
             chosen_provider = next((p for p in providers if p.is_available), None)
             if not chosen_provider:
                 break
-            call_res = store.allocate(agent_row["id"], now=now)
+            agent_row = None
+            if progressive:
+                agent_row = store._connection.execute(
+                    "SELECT id FROM agents WHERE state='AVAILABLE' ORDER BY id LIMIT 1"
+                ).fetchone()
+                if not agent_row:
+                    break
+                call_res = store.allocate(agent_row["id"], now=now)
+            else:
+                call_res = store.allocate_borrower(now=now)
             if not call_res:
                 continue
 
@@ -843,7 +903,7 @@ def run_scenario(
             active_calls[cid] = _SimActiveCall(
                 call_id=cid,
                 borrower_id=call_res["borrower_id"],
-                agent_id=agent_row["id"],
+                agent_id=agent_row["id"] if agent_row else None,
                 provider_name=chosen_provider.name,
                 initiated_at=now,
                 ring_until=now + chosen_provider.ringing_delay_seconds,
@@ -860,7 +920,7 @@ def run_scenario(
 
     stranded_calls = store._connection.execute(
         """SELECT COUNT(*) FROM calls c
-           WHERE c.state IN ('INITIATED','RINGING','CONNECTED')
+           WHERE c.state IN ('ANSWERED','CONNECTED')
            AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id=c.agent_id)"""
     ).fetchone()[0]
 
@@ -884,6 +944,8 @@ def run_scenario(
         "safety_decisions": decision_counts,
         "stranded_calls": stranded_calls,
         "adjustment_latency_ticks": adjustment_latency if scenario == "agent-drop" else 0,
+        "available_agents_at_drop": available_agents_at_drop,
+        "offline_agents_at_drop": offline_agents_at_drop,
         "sample_pacing_reasons": sample_pacing_reasons,
         "sample_safety_reasons": sample_safety_reasons,
         "new_calls_during_outage": new_calls_during_outage,
@@ -908,7 +970,7 @@ def format_scenario_table(res: dict) -> str:
         f"{'Agent Utilization':<38} | {res['agent_utilization_pct']:.2f}%",
         f"{'Calls Initiated':<38} | {res['calls_initiated']}",
         f"{'Calls Connected':<38} | {res['calls_connected']}",
-        f"{'Abandoned Connected Calls':<38} | {res['abandoned_calls']}",
+        f"{'Abandoned Calls':<38} | {res['abandoned_calls']}",
         f"{'Pacing Proposals Evaluated':<38} | {res['pacing_proposals_count']}",
         f"{'Safety (Approve/Red/Rej/FB)':<38} | {approve}/{reduce_cnt}/{reject}/{fallback}",
         f"{'Stranded Calls (Target: 0)':<38} | {res['stranded_calls']}",

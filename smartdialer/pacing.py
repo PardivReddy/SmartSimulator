@@ -153,6 +153,26 @@ class SafetyController:
         expected_free = free_agents + inputs.expected_finishing_agents
         proposed_calls = proposal.calls_to_start
 
+        def risk_adjusted_answers(total_attempts: int, answer_probability: float) -> float:
+            # A 2.33-sigma one-sided margin guards batch approvals against answer variance.
+            answer_margin = 2.33 * math.sqrt(
+                total_attempts * answer_probability * (1.0 - answer_probability)
+            )
+            return total_attempts * answer_probability + answer_margin
+
+        def capacity_limited_calls(max_calls: int, answer_probability: float) -> tuple[int, float]:
+            low = 0
+            high = max_calls
+            while low < high:
+                candidate = (low + high + 1) // 2
+                total_attempts = inputs.calls_in_flight + candidate
+                if risk_adjusted_answers(total_attempts, answer_probability) <= expected_free:
+                    low = candidate
+                else:
+                    high = candidate - 1
+            total_attempts = inputs.calls_in_flight + low
+            return low, risk_adjusted_answers(total_attempts, answer_probability)
+
         # Start from proposal rate and caps
         rate = max(0.0, min(proposal.calls_per_minute, self.max_calls_per_minute))
         if proposal.calls_per_minute > self.max_calls_per_minute:
@@ -252,42 +272,55 @@ class SafetyController:
             and inputs.baseline_answer_rate > 0
             and (inputs.baseline_answer_rate - inputs.answer_rate) >= self.sharp_drop_threshold
         ):
-            approved_calls = max(0, math.ceil(proposed_calls * 0.5))
+            reduced_proposal = max(0, math.ceil(proposed_calls * 0.5))
+            answer_p = max(
+                0.01,
+                min(
+                    1.0,
+                    max(inputs.answer_rate, inputs.baseline_answer_rate),
+                ),
+            )
+            approved_calls, upper_answers = capacity_limited_calls(reduced_proposal, answer_p)
             rate = float(approved_calls * 60)
             reasons.append("sharp_answer_rate_drop")
             action = "REDUCE"
             reason_line = (
                 f"reduced to {approved_calls}: sharp answer-rate drop from "
-                f"{inputs.baseline_answer_rate:.2f} to {inputs.answer_rate:.2f}"
+                f"{inputs.baseline_answer_rate:.2f} to {inputs.answer_rate:.2f}; "
+                f"risk-adjusted answer cap {upper_answers:.1f} "
+                f"<= free agents ({expected_free})"
             )
 
-        # Trigger 8: Hard cap bounding expected answers from new and in-flight calls
+        # Trigger 8: Risk-adjusted cap on expected answers from new and in-flight calls
         else:
             answer_p = max(
-                0.01, min(1.0, inputs.answer_rate if inputs.sample_count >= 10 else 0.50)
+                0.50, min(1.0, inputs.answer_rate if inputs.sample_count >= 10 else 0.50)
             )
             flight_answers = inputs.calls_in_flight * answer_p
             new_answers = proposed_calls * answer_p
             total_answers = flight_answers + new_answers
 
-            if total_answers > expected_free:
-                remaining_ans = max(0.0, expected_free - flight_answers)
-                max_new = max(0, math.floor(remaining_ans / answer_p))
-                approved_calls = min(proposed_calls, max_new)
+            approved_calls, upper_answers = capacity_limited_calls(proposed_calls, answer_p)
+            proposed_upper_answers = risk_adjusted_answers(
+                inputs.calls_in_flight + proposed_calls, answer_p
+            )
+
+            if approved_calls < proposed_calls:
                 rate = float(approved_calls * 60)
                 reasons.append("hard_cap_free_agents")
                 action = "REDUCE"
                 reason_line = (
                     f"reduced to {approved_calls}: hard cap expected answers "
-                    f"({new_answers:.1f} new + {flight_answers:.1f} flight = {total_answers:.1f}) "
-                    f"> free agents ({expected_free})"
+                    f"({new_answers:.1f} new + {flight_answers:.1f} flight = {total_answers:.1f}); "
+                    f"proposed risk-adjusted answers {proposed_upper_answers:.1f} "
+                    f"> free agents ({expected_free}); approved bound {upper_answers:.1f}"
                 )
             else:
                 approved_calls = proposed_calls
                 action = "APPROVE"
                 reason_line = (
-                    f"approved {approved_calls}: expected answers "
-                    f"({total_answers:.1f}) <= free agents ({expected_free})"
+                    f"approved {approved_calls}: risk-adjusted answers "
+                    f"({upper_answers:.1f}) <= free agents ({expected_free})"
                 )
 
         # Concurrency limit

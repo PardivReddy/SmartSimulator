@@ -20,4 +20,6 @@ data/processed/
 *.sqlite
 *.sqlite3
 
+.git-diff-*.txt
 .test-tmp/
+HANDOFF_STATUS.md

@@ -1,6 +1,6 @@
 # Resolve SmartDialer Simulator
 
-A deterministic, safety-controlled predictive and progressive dialer simulator built with pure Python and SQLite. Designed for high reliability, explainable predictive pacing, and strict caller protection without external infrastructure dependencies.
+A deterministic, local-only simulator for Progressive and Predictive dialing, built with Python and SQLite. It demonstrates explainable pacing proposals, independent safety decisions, transactional allocation, and simulated provider outcomes; it is a prototype, not a production dialer or a guarantee of caller protection.
 
 > [!IMPORTANT]
 > All activities and metrics are **purely simulated**. SmartDialer never places real telephone calls, sends messages, or communicates with external paid telecom carriers.
@@ -9,7 +9,7 @@ A deterministic, safety-controlled predictive and progressive dialer simulator b
 
 ## Final Summary
 
-SmartDialer decouples call estimation from execution through a unidirectional pipeline: **Campaign $\rightarrow$ Pacing Engine $\rightarrow$ Safety Controller $\rightarrow$ Call Allocator $\rightarrow$ Provider**. The predictive pacing engine uses a transparent, rule-based formula to propose dial volume based on expected free agents, active in-flight calls, and a recent sliding-window answer rate, always outputting an explainable one-line justification. The independent Safety Controller holds unconditional veto authority: it caps proposals so expected connections never exceed free agents, throttles dialing on sharp answer-rate drops or high abandonment, and automatically falls back to progressive 1:1 dialing when sample sizes are small or provider health degrades. Crucially, predictive logic cannot place calls; only the Call Allocator reserves agents and borrowers using atomic conditional updates under SQLite immediate write locks. Carrier webhooks are validated with provider-scoped idempotency keys and monotonic sequence numbers, rejecting stale or duplicate events without side effects. If a worker crashes mid-call, pre-provider reservations are safely requeued while in-flight provider calls are quarantined in an `UNCERTAIN` state, ensuring no borrower is ever double-dialed or stranded.
+SmartDialer decouples call estimation from execution through a pipeline: **Campaign → Pacing Engine → Safety Controller → Call Allocator → Mock Provider**. The Predictive Pacing Engine proposes dial volume from available capacity, in-flight calls, and recent answer rates; the independent Safety Controller applies caps and may approve, reduce, reject, pause, or fall back to Progressive dialing under defined conditions. Progressive dialing reserves an agent before initiating; Predictive dialing reserves a borrower and claims an available agent when answered. If no agent can be claimed, the call is recorded as `ABANDONED_NO_AGENT`. These are local simulation behaviors, not production guarantees. Provider events use provider-scoped idempotency and sequence checks. Recovery safely requeues pre-provider reservations and quarantines provider-started calls as `UNCERTAIN`; reconciliation may require a later provider event, and this prototype does not provide production worker supervision or caller-protection/compliance controls.
 
 ---
 
@@ -30,7 +30,7 @@ uv sync --locked --extra dev
 ### 2. Run Test Suite and Linters
 
 ```powershell
-# Run full unit and regression test suite (91 tests)
+# Run the full unit and regression test suite
 uv run pytest --basetemp=.test-tmp/pytest -o cache_dir=.test-tmp/pytest_cache
 
 # Run linter and formatting checks
@@ -45,7 +45,7 @@ uv run python -m smartdialer.cli load-test --agents 32 --borrowers 32 --workers 
 
 ## Running Simulations
 
-Run any of the required deterministic scenarios via CLI. Results are displayed as a formatted terminal table and automatically archived in [`docs/simulation_results.md`](docs/simulation_results.md).
+The A, B, C, D, `agent-drop`, and `outage` scenario commands print a formatted terminal table and append or replace that scenario's section in [`docs/simulation_results.md`](docs/simulation_results.md). Re-running those commands therefore modifies the results document. Other `simulate` commands, including `provider_outage`, and the `load-test` command print JSON and do not write simulation results to that document.
 
 ```powershell
 # Scenario A: 20% answer rate, 120s talk duration
@@ -72,15 +72,15 @@ uv run python -m smartdialer.cli simulate --scenario outage --seed 42
 ## Architectural Principles & Core Guarantees
 
 1. **Atomic Conditional Reservations**:
-   Agent allocation uses `UPDATE agents SET state='RESERVED' WHERE id=? AND state='AVAILABLE'` with `changes() == 1` validation within `BEGIN IMMEDIATE` transactions. Multi-threaded races guarantee exactly one winner.
+   Progressive agent allocation uses `UPDATE agents SET state='RESERVED' WHERE id=? AND state='AVAILABLE'` with `changes() == 1` validation within `BEGIN IMMEDIATE` transactions. Predictive calls reserve a borrower only; when answered, a separate `BEGIN IMMEDIATE` transaction conditionally claims an available agent and links it to the call. Multi-threaded races cannot claim the same available agent twice.
 2. **Strict Separation of ANSWERED and CONNECTED**:
-   A carrier pickup event (`ANSWERED`) does not imply agent audio bridge (`CONNECTED`). Calls are only marked `CONNECTED` once agent allocation is confirmed.
+   A simulated provider pickup event (`ANSWERED`) does not imply an agent audio bridge (`CONNECTED`). Calls are only marked `CONNECTED` once agent allocation is confirmed.
 3. **Idempotency & Replay Resistance**:
-   Every carrier event is scoped by `(provider, event_id)` and checked against monotonically increasing sequence numbers. Duplicates and out-of-order events produce zero state transitions.
+   Every simulated provider event is scoped by `(provider, event_id)` and checked against monotonically increasing sequence numbers. Duplicates and out-of-order events produce zero state transitions.
 4. **Tri-Point Crash Recovery**:
    - *Point 1 (Agent Reserved)*: Orphan reserved agents reset to `AVAILABLE`.
-   - *Point 2 (Pre-Provider Call)*: Safely requeued to `QUEUED`, agent returned to `AVAILABLE`.
-   - *Point 3 (Provider In-Flight)*: Call moved to `UNCERTAIN`, agent `PAUSED` to avoid duplicate dialing.
+   - *Point 2 (Pre-Provider Call)*: Safely requeued to `QUEUED`. An associated agent is returned to `AVAILABLE` only if it is still `RESERVED`; if it became `PAUSED` before provider initiation, it remains `PAUSED`. Predictive reservations may have no agent assigned.
+   - *Point 3 (Provider In-Flight)*: Call moved to `UNCERTAIN`; any assigned agent is `PAUSED` to avoid duplicate dialing.
 
 ---
 

@@ -50,6 +50,32 @@ def test_predictive_execution_obeys_safety_pause_during_provider_outage():
     simulation.store.close()
 
 
+def test_legacy_predictive_run_respects_zero_safety_approved_starts():
+    simulation = Simulation.create(seed=42)
+
+    metrics = simulation.run(agents=2, borrowers=10, mode="predictive")
+
+    assert simulation.safety.history[-1].approved_calls_per_minute > 0
+    assert simulation.safety.history[-1].approved_calls_to_start == 0
+    assert metrics.attempted == 0
+    assert simulation.store._connection.execute("SELECT COUNT(*) FROM calls").fetchone()[0] == 0
+    simulation.store.close()
+
+
+def test_predictive_runner_uses_actual_zero_available_agent_count():
+    simulation = Simulation.create(seed=42)
+
+    metrics = simulation.run(
+        agents=2, borrowers=10, mode="predictive", scenario="no_available_agents"
+    )
+
+    assert simulation.safety.history[-1].action == "IDLE"
+    assert simulation.safety.history[-1].approved_calls_to_start == 0
+    assert metrics.attempted == 0
+    assert simulation.store._connection.execute("SELECT COUNT(*) FROM calls").fetchone()[0] == 0
+    simulation.store.close()
+
+
 def test_new_call_uses_healthy_provider_when_another_is_unavailable():
     simulation = Simulation.create(seed=3)
     unavailable, healthy = simulation.providers
@@ -188,6 +214,8 @@ def test_simulation_scenarios_abandonment_and_safety_bounds(scenario):
     assert res["stranded_calls"] == 0
     if scenario == "agent-drop":
         assert res["adjustment_latency_ticks"] <= 2
+        assert res["available_agents_at_drop"] == 60
+        assert res["offline_agents_at_drop"] == 40
     if scenario == "outage":
         assert res["new_calls_during_outage"] == 0
 
@@ -198,5 +226,5 @@ def test_cli_runs_scenario_table(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "SCENARIO: A | Seed: 42" in output
     assert "Agent Utilization" in output
-    assert "Abandoned Connected Calls" in output
+    assert "Abandoned Calls" in output
     assert "Stranded Calls (Target: 0)" in output

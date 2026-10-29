@@ -37,8 +37,10 @@ class SimulationMetrics:
         provider_errors: int = 0,
         agent_count: int = 0,
         agent_busy_seconds: float = 0.0,
+        provider_attempts: int | None = None,
+        answered_no_agent: int = 0,
     ) -> SimulationMetrics:
-        attempted = sum(
+        logical_attempted = sum(
             states.get(s, 0)
             for s in (
                 "INITIATED",
@@ -49,13 +51,17 @@ class SimulationMetrics:
                 "FAILED",
                 "RETRY_WAIT",
                 "UNCERTAIN",
+                "ABANDONED_NO_AGENT",
             )
         )
+        attempted = logical_attempted if provider_attempts is None else provider_attempts
         answered = sum(states.get(s, 0) for s in ("ANSWERED", "CONNECTED", "COMPLETED"))
+        answered += answered_no_agent
         connected = sum(states.get(s, 0) for s in ("CONNECTED", "COMPLETED"))
         completed = states.get("COMPLETED", 0)
         failed = states.get("FAILED", 0)
         cancelled = states.get("CANCELLED", 0)
+        abandoned_no_agent = states.get("ABANDONED_NO_AGENT", 0)
         denominator = attempted or 1
         active_plus_done = attempted + cancelled
         total_agent_seconds = max(0, agent_count) * max(0.0, elapsed_seconds)
@@ -68,7 +74,7 @@ class SimulationMetrics:
             failed,
             cancelled,
             connected / denominator,
-            cancelled / (active_plus_done or 1),
+            (cancelled + abandoned_no_agent) / (active_plus_done or 1),
             provider_errors / denominator,
             provider_errors,
             retries,

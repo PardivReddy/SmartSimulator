@@ -40,3 +40,4 @@ def test_answered_does_not_imply_connected():
     assert CallState.ANSWERED in CALL_TRANSITIONS[CallState.RINGING]
     assert CallState.CONNECTED not in CALL_TRANSITIONS[CallState.RINGING]
     assert CallState.CONNECTED in CALL_TRANSITIONS[CallState.ANSWERED]
+    assert CallState.ABANDONED_NO_AGENT in CALL_TRANSITIONS[CallState.ANSWERED]

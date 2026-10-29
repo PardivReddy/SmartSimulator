@@ -68,6 +68,20 @@ def test_safety_reduces_abandonment_risk_and_provider_outage():
     assert paused.approved_calls_per_minute == 0
 
 
+def test_abandonment_cap_reduces_then_falls_back_to_progressive():
+    controller = SafetyController()
+    proposal = PacingProposal(calls_per_minute=600, estimated_abandonment_risk=0)
+
+    reduced = controller.approve(proposal, inputs(recent_abandonment_rate=0.04))
+    assert reduced.action == "REDUCE"
+    assert "abandon risk exceeds limit 3.0%" in reduced.reason
+
+    fallback = controller.approve(proposal, inputs(recent_abandonment_rate=0.06))
+    assert fallback.action == "FALLBACK_PROGRESSIVE"
+    assert "rolling abandon rate 6.0%" in fallback.reason
+    assert "critical abandonment limit 5.0%" in fallback.reason
+
+
 def test_no_agents_blocks_work():
     result = SafetyController().approve(
         PacingProposal(10, 0), inputs(available_agents=0, busy_agents=0, pending_calls=2)
@@ -135,8 +149,9 @@ def test_safety_controller_all_decision_types():
     decision4 = controller.approve(large_prop, hard_cap_inp)
     assert decision4.action == "REDUCE"
     assert (
-        "reduced to 5: hard cap expected answers "
-        "(8.0 new + 0.0 flight = 8.0) > free agents (4)" in decision4.reason
+        "reduced to 2: hard cap expected answers "
+        "(8.0 new + 0.0 flight = 8.0); proposed risk-adjusted answers "
+        "10.9 > free agents (4); approved bound 2.9" in decision4.reason
     )
 
     # 5. APPROVE when within safe bounds

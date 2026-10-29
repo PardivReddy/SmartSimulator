@@ -28,16 +28,27 @@ class CallState(StrEnum):
     UNCERTAIN = "UNCERTAIN"
     CANCELLED = "CANCELLED"
     ABANDONED = "ABANDONED"
+    ABANDONED_NO_AGENT = "ABANDONED_NO_AGENT"
 
 
 AGENT_TRANSITIONS: dict[AgentState, set[AgentState]] = {
     AgentState.OFFLINE: {AgentState.AVAILABLE},
-    AgentState.AVAILABLE: {AgentState.OFFLINE, AgentState.RESERVED, AgentState.PAUSED},
+    AgentState.AVAILABLE: {
+        AgentState.OFFLINE,
+        AgentState.RESERVED,
+        AgentState.CONNECTED,
+        AgentState.PAUSED,
+    },
     AgentState.RESERVED: {AgentState.AVAILABLE, AgentState.DIALING, AgentState.PAUSED},
     AgentState.DIALING: {AgentState.AVAILABLE, AgentState.CONNECTED, AgentState.PAUSED},
     AgentState.CONNECTED: {AgentState.WRAP_UP, AgentState.PAUSED},
     AgentState.WRAP_UP: {AgentState.AVAILABLE, AgentState.PAUSED},
-    AgentState.PAUSED: {AgentState.AVAILABLE, AgentState.OFFLINE, AgentState.WRAP_UP},
+    AgentState.PAUSED: {
+        AgentState.AVAILABLE,
+        AgentState.OFFLINE,
+        AgentState.CONNECTED,
+        AgentState.WRAP_UP,
+    },
 }
 
 CALL_TRANSITIONS: dict[CallState, set[CallState]] = {
@@ -67,6 +78,7 @@ CALL_TRANSITIONS: dict[CallState, set[CallState]] = {
         CallState.FAILED,
         CallState.UNCERTAIN,
         CallState.ABANDONED,
+        CallState.ABANDONED_NO_AGENT,
     },
     CallState.CONNECTED: {
         CallState.COMPLETED,
@@ -85,6 +97,7 @@ CALL_TRANSITIONS: dict[CallState, set[CallState]] = {
     },
     CallState.CANCELLED: set(),
     CallState.ABANDONED: set(),
+    CallState.ABANDONED_NO_AGENT: set(),
 }
 
 
