@@ -1,4 +1,4 @@
-# SmartDialer Architecture
+# SmartSimulator Architecture
 
 ## Purpose
 
