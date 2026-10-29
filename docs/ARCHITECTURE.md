@@ -1,181 +1,56 @@
 # SmartDialer Architecture
 
-## System Flow & Architecture Diagram
+## Purpose
+
+SmartDialer is a local simulator for selecting queued borrowers, allocating agents, and modeling outbound calls. It supports Progressive and Predictive dialing modes and uses seeded mock providers; it does not connect to telephone carriers.
+
+## End-to-end architecture
 
 ```mermaid
-flowchart TD
-    subgraph Campaign Management
-        CAMP[Campaign / Borrower Queue]
-    end
-
-    subgraph Dialing Pipeline
-        PACE[Pacing Engine\nRule-Based Estimator]
-        SAFE[Safety Controller\nIndependent Hard Gates]
-        ALLOC[Call Allocator\nAtomic Conditional Allocation]
-    end
-
-    subgraph Infrastructure
-        STORE[(SQLite Database\nSingle Source of Truth)]
-        WORKERS[Worker Pool / Contenders]
-    end
-
-    subgraph Telephony Providers
-        PA[Provider A: Fast & Reliable]
-        PB[Provider B: Slow, Timeouts & Latency]
-    end
-
-    CAMP -->|Borrower Queue & Priority| ALLOC
-    WORKERS -->|Concurrent Poll / Trigger| PACE
-    PACE -->|Proposed Calls & Reason Line| SAFE
-    SAFE -->|Approved / Reduced / Fallback Dials| ALLOC
-    ALLOC -->|Atomic UPDATE & INSERT| STORE
-    ALLOC -->|Initiate Call| PA
-    ALLOC -->|Initiate Call| PB
-    PA -->|Simulated Provider Events| STORE
-    PB -->|Simulated Provider Events| STORE
-    STORE -->|Predictive ANSWERED: atomically claim free agent| CLAIM[Agent Claim]
-    CLAIM --> STORE
-    STORE -.->|Agent & Call States| WORKERS
+flowchart LR
+    QUEUE["Queued borrowers"] --> MODE{"Dialing mode"}
+    MODE --> PROG["Progressive Dialer"]
+    MODE --> PRED["Predictive Pacing Engine"]
+    PROG -->|"Request calls when agents are available"| STORE["Call allocation and SQLite storage"]
+    PRED -->|"Propose start count; no provider call"| SAFE["Safety Controller"]
+    SAFE -->|"APPROVE / REDUCE"| STORE
+    SAFE -->|"FALLBACK_PROGRESSIVE"| PROG
+    SAFE -.->|"REJECT / PAUSE / IDLE: zero starts"| METRICS["Metrics and results"]
+    STORE -->|"Engine starts allocated calls"| PROVIDER["Mock telecom provider"]
+    PROVIDER --> EVENTS["Call events and state updates"]
+    EVENTS -->|"Validated event updates"| STORE
+    STORE --> METRICS
 ```
 
----
+## End-to-end workflow
 
-## State Machines
+1. Eligible borrowers enter the SQLite queue with priorities; allocation selects the highest-priority eligible borrower.
+2. The selected mode determines how a call is requested. Progressive dialing reserves an available agent and a borrower together. Predictive pacing proposes a start count but never starts provider calls itself. Allocation differs by runner: the discrete-time scenario runner reserves a borrower without an agent, while the legacy batch runner's Predictive mode reserves an agent and borrower together.
+3. The predictive path sends its proposal and current inputs to Safety. Safety may approve or reduce starts, return zero starts through `REJECT`, `PAUSE`, or `IDLE`, or select Progressive fallback. In the discrete-time scenario runner, only Safety-approved starts proceed. The legacy direct Progressive batch runner allocates within its capacity limits without a Safety approval step.
+4. SQLite transactions protect allocations. In the discrete-time scenario runner, an answer to an unassigned Predictive call triggers an atomic attempt to claim an available agent; if none can be claimed, the call becomes `ABANDONED_NO_AGENT`.
+5. After allocation, the simulation engine runs a seeded mock provider. Answers can proceed through `CONNECTED` to `COMPLETED`; no-answer and provider-failure outcomes are recorded as `FAILED`.
+6. Storage checks event identity, sequence, and allowed state transitions before updating call and agent state. Eligible provider failures can enter bounded retry with backoff. Recovery requeues pre-provider reservations and quarantines provider-started calls as `UNCERTAIN`.
+7. Simulation metrics summarize attempts, answers, connections, failures, retries, abandonment, throughput, and agent utilization where the runner supplies the relevant data.
 
-### Agent State Machine
+## Main components
 
-```mermaid
-stateDiagram-v2
-    [*] --> OFFLINE
-    OFFLINE --> AVAILABLE: Agent logs in
-    AVAILABLE --> OFFLINE: Agent logs out
-    AVAILABLE --> RESERVED: Atomic conditional UPDATE
-    AVAILABLE --> CONNECTED: Predictive answer claims free agent
-    AVAILABLE --> PAUSED: Inactivity / Outage / Drop
-    
-    RESERVED --> DIALING: Call initiated
-    RESERVED --> AVAILABLE: Pre-provider cancellation / rollback
-    RESERVED --> PAUSED: Administrative pause
-    
-    DIALING --> CONNECTED: Borrower answered & bridged
-    DIALING --> AVAILABLE: No answer / Provider failure
-    DIALING --> PAUSED: Provider uncertain outcome
-    
-    CONNECTED --> WRAP_UP: Call terminated / hung up
-    CONNECTED --> PAUSED: Session hold / exception
-    
-    WRAP_UP --> AVAILABLE: Wrap-up grace period expired
-    WRAP_UP --> PAUSED: Agent requests break
-    
-    PAUSED --> AVAILABLE: Unpause
-    PAUSED --> OFFLINE: Log out while paused
-    PAUSED --> WRAP_UP: Complete pending notes
-```
+| Component | Responsibility |
+|---|---|
+| Progressive Dialer | Starts calls only when an available agent can be reserved with an eligible borrower. It is also the fallback selected by Safety in the scenario runner. |
+| Predictive Pacing Engine | Estimates a proposed call-start count from capacity, pending work, and answer-rate inputs. It proposes pacing but does not initiate provider calls. |
+| Safety Controller | Applies availability, provider-health, input-age, concurrency, and abandonment-risk checks to predictive proposals. Its decisions include approval, reduction, rejection, pause, idle, and Progressive fallback. |
+| SQLite storage | Persists borrower, call, agent, and event data. Transactions prevent conflicting reservations and validate event-driven state changes. |
+| Mock telecom providers | Produce deterministic simulated answer, no-answer, and failure outcomes subject to configured provider limits and availability. |
+| Simulation and metrics | Orchestrates allocations and events, then reports aggregates for the local simulation. |
 
-### Call State Machine
+## Safety and reliability choices
 
-```mermaid
-stateDiagram-v2
-    [*] --> QUEUED
-    
-    QUEUED --> RESERVED: Borrower reserved (agent optional)
-    QUEUED --> CANCELLED: Campaign stopped / borrower ineligible
-    
-    RESERVED --> INITIATED: Provider dial triggered
-    RESERVED --> QUEUED: Worker crash recovered before provider
-    RESERVED --> CANCELLED: Pre-dial cancellation
-    RESERVED --> FAILED: Provider unreachable
-    RESERVED --> RETRY_WAIT: Claimed retry deferred when provider is unavailable
-    
-    INITIATED --> RINGING: Provider signaling line ring
-    INITIATED --> FAILED: Immediate network rejection
-    INITIATED --> UNCERTAIN: Worker crash / timeout before ring
-    INITIATED --> CANCELLED: Dial abort
-    
-    RINGING --> ANSWERED: Borrower picks up phone
-    RINGING --> FAILED: Busy / No Answer / Provider Timeout
-    RINGING --> UNCERTAIN: Worker crash during ringing
-    RINGING --> CANCELLED: Call dropped before pickup
-    
-    ANSWERED --> CONNECTED: Audio bridge to claimed agent established
-    ANSWERED --> ABANDONED: Abandoned disposition
-    ANSWERED --> ABANDONED_NO_AGENT: No free agent can be claimed
-    ANSWERED --> COMPLETED: Immediate IVR / audio disposition
-    ANSWERED --> FAILED: Immediate audio drop
-    ANSWERED --> UNCERTAIN: Worker crash during answer handshake
-    
-    CONNECTED --> COMPLETED: Normal termination / caller hung up
-    CONNECTED --> FAILED: In-call drop / carrier disconnect
-    CONNECTED --> UNCERTAIN: Worker restart while call active
-    
-    UNCERTAIN --> RINGING: Late ringing event received
-    UNCERTAIN --> ANSWERED: Late answer event received
-    UNCERTAIN --> CONNECTED: Late connection verified
-    UNCERTAIN --> COMPLETED: Late provider completion webhook
-    %% UNCERTAIN remains quarantined until a provider event reconciles it.
-    
-    FAILED --> RETRY_WAIT: Bounded retry scheduled (exponential backoff)
-    RETRY_WAIT --> RESERVED: Retry delay elapsed & agent claimed
-    RETRY_WAIT --> FAILED: Max retry attempts exhausted
-    RETRY_WAIT --> CANCELLED: Borrower suppressed or opt-out
-    
-    COMPLETED --> [*]
-    CANCELLED --> [*]
-    ABANDONED --> [*]
-    ABANDONED_NO_AGENT --> [*]
-```
+- Progressive allocation reserves an agent and borrower in a SQLite write transaction. In the discrete-time scenario runner, Predictive allocation reserves the borrower first and claims an agent atomically when the call is answered; the legacy batch runner's Predictive mode reserves both up front.
+- Predictive pacing and provider initiation are separate: the engine uses Safety's approved start count before initiating calls. In the scenario runner, a rejected, paused, or idle decision starts no new calls.
+- Provider-scoped event IDs and sequence numbers reject duplicate and stale events; call and agent transitions are checked before being stored.
+- Eligible provider failures can be retried with bounded exponential backoff. This is local simulation behavior, not a production retry scheduler.
+- Recovery requeues calls that had not reached a provider and quarantines provider-started calls. See the [reliability notes](RELIABILITY.md) for the recovery behavior and other constraints.
 
-Predictive dialing reserves an eligible borrower without reserving an agent.
-When an answer arrives, the simulator atomically claims an `AVAILABLE` agent;
-if none is free, the call transitions to terminal `ABANDONED_NO_AGENT`.
-Progressive fallback continues to reserve an agent before initiating a call.
-The call state `RESERVED` therefore does not imply that an agent is assigned.
+## Limitations
 
-Recovery does not expire `UNCERTAIN` calls automatically. A late `CONNECTED`
-event restores the call's associated agent from quarantine only while that agent
-remains `PAUSED`. If there is no associated agent, or the associated agent has
-moved to another state, the event is rejected so recovery cannot claim or release
-another call's agent. A late `COMPLETED` event can move a quarantined associated
-agent to `WRAP_UP`.
-
----
-
-## Concurrency & State Invariants
-
-### 1. How two workers cannot reserve the same agent
-Progressive agent reservation uses an atomic conditional update:
-```sql
-UPDATE agents SET state = 'RESERVED' WHERE id = ? AND state = 'AVAILABLE';
-```
-In SQLite, this runs inside an exclusive `BEGIN IMMEDIATE` write transaction with `changes() == 1` verification. Even under heavy multi-threaded contention (verified by `test_concurrent_reservation_of_one_agent_by_n_workers` with 8 threads racing for 1 agent), exactly one transaction acquires the write lock and finds `state = 'AVAILABLE'`. All competing workers observe `changes() == 0`, rollback, and receive `None`.
-
-For predictive calls, the answer handler instead conditionally updates an available agent to `CONNECTED` and assigns that agent to the `ANSWERED` call within one `BEGIN IMMEDIATE` transaction. If no agent is available, the call is recorded as terminal `ABANDONED_NO_AGENT`.
-
-### 2. How stale state is handled
-In-memory structures (such as sliding windows and worker threads) never hold reservation authority. State is verified at the database level on every state transition (`expected_state` checks). Furthermore, provider events are stamped with monotonically increasing sequence numbers `seq`: any event with `seq <= MAX(seq)` is rejected as `STALE`, and duplicate event IDs are rejected as `DUPLICATE`.
-
-### 3. Which source of truth wins
-The SQLite database file is the single, authoritative source of truth. Workers, pacing proposals, and provider adapters are stateless contenders that must validate against the database engine before executing side-effects.
-
----
-
-## Scale Analysis
-
-The figures below are operational estimates, not measured capacity results. The
-100- and 1,000-agent reservation smoke observations were recorded from local runs;
-the exact source revision was not captured, and they were not independently
-reverified during the documentation update. The 1,000-agent, 16-worker test
-intermittently hit SQLite `database is locked` errors when acquiring
-`BEGIN IMMEDIATE`. These small synthetic reservation tests do not measure
-end-to-end dialing capacity. No 10,000-agent test has been run.
-
-### 100 Agents
-The 100-agent/100-borrower/16-worker reservation smoke run completed 100/100 unique reservations with zero worker errors. The ~30–50 concurrent calls estimate is a workload assumption. Neither figure is an end-to-end capacity claim.
-
-### 1,000 Agents
-At this scale, SQLite's single-writer serialization can become a bottleneck under concurrent allocation; the local 16-worker smoke test intermittently encountered `database is locked`, while three 8-worker repetitions passed. The ~300–600 concurrent calls and ~50 call-state transitions per second are workload assumptions, not measured results.
-- **Specific Fix**: Migrate the storage engine to PostgreSQL. Use row-level locking with `SELECT id FROM agents WHERE state = 'AVAILABLE' FOR UPDATE SKIP LOCKED LIMIT 1`. Partition or shard campaigns across a pool of stateless dialing worker nodes, while an in-memory event bus (e.g. Redis Stream or RabbitMQ) ingests asynchronous carrier events before batching updates to the database.
-
-### 10,000 Agents
-10,000-agent capacity is unmeasured. The ~3,000–6,000 active calls and hundreds of state events per second are workload projections, not test results. A centralized relational database table and monolithic pacing loop may encounter lock contention and provider rate limits at this scale.
-- **Specific Fix**: Shard agents and borrower campaigns into independent tenant/campaign pods (e.g., 500-1,000 agents per pod with dedicated PostgreSQL schemas/databases). Decouple event ingestion from business logic using a distributed carrier event log (Kafka / Pulsar), with partition keys mapped to `call_id`. Use local memory rate-limiters with token buckets to enforce strict carrier SIP trunking limits, while a distributed safety controller computes partition-level hard caps.
+This is a single-machine simulator, not a production dialer or telecom integration. Its concurrency and capacity observations do not establish production-scale guarantees. Recovery does not automatically expire uncertain calls. A late `CONNECTED` event is rejected when no agent is associated or when the associated agent is no longer paused; the call stays `UNCERTAIN` for reconciliation rather than risking an unsafe assignment.
