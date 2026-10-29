@@ -38,6 +38,34 @@ def test_invalid_durations_fail_safe():
     assert estimate_pacing(inputs(mean_call_seconds=0)).calls_per_minute == 0
 
 
+def test_nonfinite_or_out_of_range_inputs_fail_safe():
+    for invalid in (
+        {"answer_rate": float("nan")},
+        {"provider_health": 1.1},
+        {"calls_in_flight": -1},
+        {"mean_wrap_seconds": float("inf")},
+    ):
+        proposal = estimate_pacing(inputs(**invalid))
+        assert proposal.calls_to_start == 0
+        assert proposal.reason == "invalid pacing inputs -> proposed 0"
+
+        decision = SafetyController().approve(
+            PacingProposal(60, 0, calls_to_start=1), inputs(**invalid)
+        )
+        assert decision.action == "PAUSE"
+        assert decision.approved_calls_to_start == 0
+
+
+def test_invalid_predictive_proposal_is_paused_without_rounding():
+    decision = SafetyController().approve(
+        PacingProposal(float("nan"), 0, calls_to_start=1), inputs()
+    )
+    assert decision.action == "PAUSE"
+    assert decision.approved_calls_per_minute == 0
+    assert decision.approved_calls_to_start == 0
+    assert decision.reasons == ("invalid_pacing_data",)
+
+
 def test_safety_caps_rate_and_concurrency():
     controller = SafetyController(max_calls_per_minute=20, max_concurrency=3)
     result = controller.approve(PacingProposal(100, 0), inputs(busy_agents=1))
@@ -87,6 +115,15 @@ def test_no_agents_blocks_work():
         PacingProposal(10, 0), inputs(available_agents=0, busy_agents=0, pending_calls=2)
     )
     assert result.approved_calls_per_minute == 0
+
+
+def test_safety_does_not_count_future_finishing_agents_as_available():
+    result = SafetyController().approve(
+        PacingProposal(120, 0, calls_to_start=2),
+        inputs(available_agents=0, expected_finishing_agents=4, pending_calls=10),
+    )
+    assert result.action == "IDLE"
+    assert result.approved_calls_to_start == 0
 
 
 def test_predictive_pacing_formula_and_reason_line():

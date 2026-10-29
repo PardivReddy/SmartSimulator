@@ -147,10 +147,24 @@ class SafetyController:
     history: list[SafetyDecision] = field(default_factory=list)
 
     def approve(self, proposal: PacingProposal, inputs: PacingInputs) -> SafetyDecision:
+        if not _valid_inputs(inputs) or not _valid_proposal(proposal):
+            decision = SafetyDecision(
+                approved_calls_per_minute=0.0,
+                approved_calls_to_start=0,
+                action="PAUSE",
+                reason="paused: invalid pacing inputs or proposal",
+                reasons=("invalid_pacing_data",),
+            )
+            self.interventions += 1
+            self.history.append(decision)
+            return decision
+
         reasons: list[str] = []
         action = "APPROVE"
         free_agents = max(0, inputs.available_agents)
-        expected_free = free_agents + inputs.expected_finishing_agents
+        # A call may answer before an agent expected to finish is actually free.
+        # Keep future capacity in the proposal, but only current availability in Safety.
+        expected_free = free_agents
         proposed_calls = proposal.calls_to_start
 
         def risk_adjusted_answers(total_attempts: int, answer_probability: float) -> float:
@@ -356,13 +370,13 @@ def estimate_pacing(inputs: PacingInputs) -> PacingProposal:
 
     and the final number.
     """
-    if inputs.mean_call_seconds <= 0 or inputs.mean_wrap_seconds < 0:
+    if not _valid_inputs(inputs):
         return PacingProposal(
             0.0,
             1.0,
-            ("invalid_duration_estimate",),
+            ("invalid_pacing_inputs",),
             calls_to_start=0,
-            reason="raw=0, invalid duration estimate -> proposed 0",
+            reason="invalid pacing inputs -> proposed 0",
         )
 
     expected_free = max(0, inputs.available_agents + inputs.expected_finishing_agents)
@@ -436,4 +450,62 @@ def estimate_pacing(inputs: PacingInputs) -> PacingProposal:
         reasons=(),
         calls_to_start=calls_to_start,
         reason=reason,
+    )
+
+
+def _valid_inputs(inputs: PacingInputs) -> bool:
+    """Reject malformed telemetry before it can influence a pacing decision."""
+    probabilities = (
+        inputs.answer_rate,
+        inputs.provider_health,
+        inputs.provider_failure_rate,
+        inputs.provider_timeout_rate,
+        inputs.recent_abandonment_rate,
+        inputs.abandonment_limit,
+    )
+    if inputs.baseline_answer_rate is not None:
+        probabilities += (inputs.baseline_answer_rate,)
+    numeric = (
+        inputs.mean_call_seconds,
+        inputs.mean_wrap_seconds,
+        inputs.expected_finishing_agents,
+        inputs.available_agents,
+        inputs.busy_agents,
+        inputs.pending_calls,
+        inputs.calls_in_flight,
+        inputs.window_size,
+        inputs.sample_count,
+        inputs.observed_at_seconds,
+        inputs.now_seconds,
+        *probabilities,
+    )
+    return (
+        all(math.isfinite(value) for value in numeric)
+        and all(0.0 <= value <= 1.0 for value in probabilities)
+        and inputs.mean_call_seconds > 0
+        and inputs.mean_wrap_seconds >= 0
+        and all(
+            value >= 0
+            for value in (
+                inputs.expected_finishing_agents,
+                inputs.available_agents,
+                inputs.busy_agents,
+                inputs.pending_calls,
+                inputs.calls_in_flight,
+                inputs.sample_count,
+                inputs.observed_at_seconds,
+                inputs.now_seconds,
+            )
+        )
+        and inputs.window_size > 0
+    )
+
+
+def _valid_proposal(proposal: PacingProposal) -> bool:
+    return (
+        math.isfinite(proposal.calls_per_minute)
+        and math.isfinite(proposal.estimated_abandonment_risk)
+        and proposal.calls_per_minute >= 0
+        and proposal.calls_to_start >= 0
+        and 0 <= proposal.estimated_abandonment_risk <= 1
     )

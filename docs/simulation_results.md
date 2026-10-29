@@ -82,6 +82,30 @@ be atomically claimed. The reduced answer rate and the available-agent capacity 
 this seeded run did not produce that condition. This result is reported as observed;
 the scenario is not forced to create an abandonment.
 
+## Final engineering pass rerun (2026-10-29)
+
+The preceding recorded table is retained as the 2026-10-28 historical snapshot.
+After the Safety Controller was changed to count only currently available agents
+when approving starts, all six 240-second profiles were rerun with seed 42. These
+are reproducible outputs from the current implementation; all values remain
+simulated. Safety counts use approve / reduce / reject / pause / fallback order.
+
+| Scenario | Agent utilization | Initiated | Connected | Abandoned | Safety decisions: approve / reduce / reject / pause / fallback | Stranded | Additional result |
+|---|---:|---:|---:|---:|---|---:|---|
+| A | 90.64% | 305 | 58 | 0 | 0 / 225 / 0 / 0 / 12 | 0 | — |
+| B | 90.71% | 168 | 84 | 0 | 0 / 207 / 0 / 0 / 10 | 0 | — |
+| C | 95.58% | 79 | 59 | 0 | 0 / 184 / 0 / 0 / 6 | 0 | — |
+| D | 90.27% | 472 | 76 | 0 | 0 / 233 / 0 / 0 / 4 | 0 | Answer probability changed from 70% to 10% and talk time from 180s to 60s at t=120s |
+| agent-drop | 49.54% | 362 | 174 | 3 | 1 / 180 / 0 / 0 / 37 | 0 | 60 agents available and 40 offline at t=30s; adjustment latency 1 tick |
+| outage | 90.71% | 168 | 84 | 0 | 0 / 167 / 0 / 40 / 10 | 0 | 0 new calls placed during outage |
+
+The agent-drop run had 3 no-agent abandonments, within the test's 2% of connected
+calls bound (3 / 174). The previous implementation allowed 28 in this run because
+Safety counted agents expected to finish within 15 seconds as already free, while
+simulated provider answers arrived after only 2–5 seconds. The estimator still
+uses expected finishers to inform its proposal; Safety now limits approval against
+current availability.
+
 ### Dedicated provider-outage flow
 
 The CLI also has a separate `provider_outage` path, distinct from the 240-second

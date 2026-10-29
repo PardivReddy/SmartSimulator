@@ -38,7 +38,7 @@ flowchart LR
 |---|---|
 | Progressive Dialer | Starts calls only when an available agent can be reserved with an eligible borrower. It is also the fallback selected by Safety in the scenario runner. |
 | Predictive Pacing Engine | Estimates a proposed call-start count from capacity, pending work, and answer-rate inputs. It proposes pacing but does not initiate provider calls. |
-| Safety Controller | Applies availability, provider-health, input-age, concurrency, and abandonment-risk checks to predictive proposals. Its decisions include approval, reduction, rejection, pause, idle, and Progressive fallback. |
+| Safety Controller | Applies current agent availability, provider-health, input-age, concurrency, and abandonment-risk checks to predictive proposals. It does not treat agents expected to finish soon as currently free. Invalid or non-finite inputs pause starts. Its decisions include approval, reduction, rejection, pause, idle, and Progressive fallback. |
 | SQLite storage | Persists borrower, call, agent, and event data. Transactions prevent conflicting reservations and validate event-driven state changes. |
 | Mock telecom providers | Produce deterministic simulated answer, no-answer, and failure outcomes subject to configured provider limits and availability. |
 | Simulation and metrics | Orchestrates allocations and events, then reports aggregates for the local simulation. |
@@ -47,6 +47,8 @@ flowchart LR
 
 - Progressive allocation reserves an agent and borrower in a SQLite write transaction. In the discrete-time scenario runner, Predictive allocation reserves the borrower first and claims an agent atomically when the call is answered; the legacy batch runner's Predictive mode reserves both up front.
 - Predictive pacing and provider initiation are separate: the engine uses Safety's approved start count before initiating calls. In the scenario runner, a rejected, paused, or idle decision starts no new calls.
+- Invalid or non-finite pacing telemetry and proposals produce a zero-start `PAUSE` decision before estimator or approval math can fail open or raise.
+- Expected agent completions may inform the estimator, but Safety caps predicted answers against agents currently available. A provider answer can arrive before a busy agent finishes, so future availability is not counted as an immediate safety slot.
 - Provider-scoped event IDs and sequence numbers reject duplicate and stale events; call and agent transitions are checked before being stored.
 - Eligible provider failures can be retried with bounded exponential backoff. This is local simulation behavior, not a production retry scheduler.
 - Recovery requeues calls that had not reached a provider and quarantines provider-started calls. See the [reliability notes](RELIABILITY.md) for the recovery behavior and other constraints.

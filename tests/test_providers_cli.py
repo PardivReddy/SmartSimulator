@@ -220,7 +220,18 @@ def test_simulation_scenarios_abandonment_and_safety_bounds(scenario):
         assert res["new_calls_during_outage"] == 0
 
 
-def test_cli_runs_scenario_table(monkeypatch, capsys):
+def test_full_agent_drop_scenario_keeps_abandonment_within_safety_bound():
+    from smartdialer.engine import run_scenario
+
+    result = run_scenario("agent-drop", seed=42, duration_ticks=240)
+    assert result["available_agents_at_drop"] == 60
+    assert result["offline_agents_at_drop"] == 40
+    assert result["adjustment_latency_ticks"] <= 2
+    assert result["abandoned_calls"] <= 0.02 * max(1, result["calls_connected"])
+
+
+def test_cli_runs_scenario_table(monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.argv", ["smartdialer", "simulate", "--scenario", "A", "--seed", "42"])
     main()
     output = capsys.readouterr().out
